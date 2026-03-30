@@ -163,7 +163,9 @@ class BusApi:
 
         for item in items:
             ars_id = str(item.get("arsId") or item.get("arsid") or "").strip()
-            station_id = str(item.get("stId") or item.get("stationId") or item.get("stationid") or "").strip()
+            station_id = str(
+                item.get("stId") or item.get("stid") or item.get("stationId") or item.get("stationid") or ""
+            ).strip()
             station_name = str(item.get("stNm") or item.get("stationNm") or item.get("stationName") or "").strip()
             if not station_id:
                 continue
@@ -376,27 +378,31 @@ def _xml_to_dict(element: ET.Element) -> dict[str, Any] | str:
 
     values: dict[str, Any] = {}
     for child in element:
+        tag = _strip_namespace(child.tag)
         value = _xml_to_dict(child)
-        if child.tag in values:
-            existing = values[child.tag]
+        if tag in values:
+            existing = values[tag]
             if not isinstance(existing, list):
-                values[child.tag] = [existing, value]
+                values[tag] = [existing, value]
             else:
                 existing.append(value)
         else:
-            values[child.tag] = value
+            values[tag] = value
     return values
 
 
 def _extract_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     response_obj = payload.get("response") or payload.get("ServiceResult") or payload
-    msg_body = response_obj.get("msgBody") if isinstance(response_obj, dict) else {}
+    msg_body: dict[str, Any] = {}
+    if isinstance(response_obj, dict):
+        raw_msg_body = response_obj.get("msgBody")
+        msg_body = raw_msg_body if isinstance(raw_msg_body, dict) else response_obj
 
     if not isinstance(msg_body, dict):
         return []
 
     for key in ("busArrivalList", "busStationList", "itemList", "item", "ServiceResult"):
-        value = msg_body.get(key)
+        value = msg_body.get(key) or msg_body.get(key.lower())
         if value is None:
             continue
         if isinstance(value, list):
@@ -465,3 +471,9 @@ def _first_present(payload: dict[str, Any], *keys: str) -> Any:
         if key in payload and payload[key] is not None:
             return payload[key]
     return None
+
+
+def _strip_namespace(tag: str) -> str:
+    if "}" in tag:
+        return tag.split("}", 1)[1]
+    return tag

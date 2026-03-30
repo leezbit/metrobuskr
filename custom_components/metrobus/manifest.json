@@ -1,0 +1,13 @@
+{
+  "domain": "metrobus",
+  "name": "MetroBus KR Arrivals (Gyeonggi/Seoul)",
+  "codeowners": [
+    "@leezbit"
+  ],
+  "config_flow": true,
+  "documentation": "https://www.data.go.kr/data/15000314/openapi.do",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "version": "0.3.0"
+}

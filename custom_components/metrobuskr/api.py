@@ -154,9 +154,11 @@ class BusApi:
         query_normalized = _normalize_station_code(query_digits)
 
         params_candidates = []
+        ars_id_candidates = _seoul_ars_id_candidates(query_digits)
         for key in self._service_key_candidates():
-            params_candidates.append({"ServiceKey": key, "arsId": query_digits})
-            params_candidates.append({"serviceKey": key, "arsId": query_digits})
+            for ars_id in ars_id_candidates:
+                params_candidates.append({"ServiceKey": key, "arsId": ars_id})
+                params_candidates.append({"serviceKey": key, "arsId": ars_id})
 
         payload = await self._request_with_fallback(list(SEOUL_STATION_ENDPOINTS), params_candidates)
         items = _extract_items(payload)
@@ -464,6 +466,29 @@ def _digits_only(value: str) -> str:
 def _normalize_station_code(value: str) -> str:
     normalized = value.lstrip("0")
     return normalized or "0"
+
+
+def _seoul_ars_id_candidates(value: str) -> list[str]:
+    normalized = _normalize_station_code(value)
+    candidates: list[str] = []
+    for candidate in (
+        value,
+        normalized,
+        _format_ars_id(value),
+        _format_ars_id(normalized),
+    ):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _format_ars_id(value: str) -> str:
+    digits = _digits_only(value)
+    if len(digits) == 5:
+        return f"{digits[:2]}-{digits[2:]}"
+    if len(digits) == 6:
+        return f"{digits[:3]}-{digits[3:]}"
+    return ""
 
 
 def _first_present(payload: dict[str, Any], *keys: str) -> Any:

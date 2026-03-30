@@ -151,6 +151,7 @@ class BusApi:
         query_digits = _digits_only(station_code)
         if not query_digits:
             raise BusApiError("Station code is empty")
+        query_normalized = _normalize_station_code(query_digits)
 
         params_candidates = []
         for key in self._service_key_candidates():
@@ -167,7 +168,15 @@ class BusApi:
             if not station_id:
                 continue
 
-            if _digits_only(ars_id) == query_digits or not ars_id:
+            ars_digits = _digits_only(ars_id)
+            ars_normalized = _normalize_station_code(ars_digits)
+            if (
+                ars_digits == query_digits
+                or ars_normalized == query_normalized
+                or query_digits.endswith(ars_digits)
+                or ars_digits.endswith(query_digits)
+                or not ars_id
+            ):
                 return Station(
                     station_id=station_id,
                     station_name=station_name or station_code,
@@ -444,6 +453,11 @@ def _to_optional_str(value: Any) -> str | None:
 
 def _digits_only(value: str) -> str:
     return "".join(ch for ch in value if ch.isdigit())
+
+
+def _normalize_station_code(value: str) -> str:
+    normalized = value.lstrip("0")
+    return normalized or "0"
 
 
 def _first_present(payload: dict[str, Any], *keys: str) -> Any:

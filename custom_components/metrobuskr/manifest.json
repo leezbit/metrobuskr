@@ -1,0 +1,13 @@
+{
+  "domain": "ggbus",
+  "name": "Gyeonggi Bus Stop Arrivals",
+  "codeowners": [
+    "@leezbit"
+  ],
+  "config_flow": true,
+  "documentation": "https://www.data.go.kr/data/15080346/openapi.do",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "version": "0.1.0"
+}

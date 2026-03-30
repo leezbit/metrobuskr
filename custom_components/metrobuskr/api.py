@@ -154,16 +154,20 @@ class BusApi:
         query_normalized = _normalize_station_code(query_digits)
 
         params_candidates = []
+        ars_id_candidates = _seoul_ars_id_candidates(query_digits)
         for key in self._service_key_candidates():
-            params_candidates.append({"ServiceKey": key, "arsId": query_digits})
-            params_candidates.append({"serviceKey": key, "arsId": query_digits})
+            for ars_id in ars_id_candidates:
+                params_candidates.append({"ServiceKey": key, "arsId": ars_id})
+                params_candidates.append({"serviceKey": key, "arsId": ars_id})
 
         payload = await self._request_with_fallback(list(SEOUL_STATION_ENDPOINTS), params_candidates)
         items = _extract_items(payload)
 
         for item in items:
             ars_id = str(item.get("arsId") or item.get("arsid") or "").strip()
-            station_id = str(item.get("stId") or item.get("stationId") or item.get("stationid") or "").strip()
+            station_id = str(
+                item.get("stId") or item.get("stid") or item.get("stationId") or item.get("stationid") or ""
+            ).strip()
             station_name = str(item.get("stNm") or item.get("stationNm") or item.get("stationName") or "").strip()
             if not station_id:
                 continue
@@ -376,27 +380,31 @@ def _xml_to_dict(element: ET.Element) -> dict[str, Any] | str:
 
     values: dict[str, Any] = {}
     for child in element:
+        tag = _strip_namespace(child.tag)
         value = _xml_to_dict(child)
-        if child.tag in values:
-            existing = values[child.tag]
+        if tag in values:
+            existing = values[tag]
             if not isinstance(existing, list):
-                values[child.tag] = [existing, value]
+                values[tag] = [existing, value]
             else:
                 existing.append(value)
         else:
-            values[child.tag] = value
+            values[tag] = value
     return values
 
 
 def _extract_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     response_obj = payload.get("response") or payload.get("ServiceResult") or payload
-    msg_body = response_obj.get("msgBody") if isinstance(response_obj, dict) else {}
+    msg_body: dict[str, Any] = {}
+    if isinstance(response_obj, dict):
+        raw_msg_body = response_obj.get("msgBody")
+        msg_body = raw_msg_body if isinstance(raw_msg_body, dict) else response_obj
 
     if not isinstance(msg_body, dict):
         return []
 
     for key in ("busArrivalList", "busStationList", "itemList", "item", "ServiceResult"):
-        value = msg_body.get(key)
+        value = msg_body.get(key) or msg_body.get(key.lower())
         if value is None:
             continue
         if isinstance(value, list):
@@ -460,8 +468,37 @@ def _normalize_station_code(value: str) -> str:
     return normalized or "0"
 
 
+def _seoul_ars_id_candidates(value: str) -> list[str]:
+    normalized = _normalize_station_code(value)
+    candidates: list[str] = []
+    for candidate in (
+        value,
+        normalized,
+        _format_ars_id(value),
+        _format_ars_id(normalized),
+    ):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _format_ars_id(value: str) -> str:
+    digits = _digits_only(value)
+    if len(digits) == 5:
+        return f"{digits[:2]}-{digits[2:]}"
+    if len(digits) == 6:
+        return f"{digits[:3]}-{digits[3:]}"
+    return ""
+
+
 def _first_present(payload: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         if key in payload and payload[key] is not None:
             return payload[key]
     return None
+
+
+def _strip_namespace(tag: str) -> str:
+    if "}" in tag:
+        return tag.split("}", 1)[1]
+    return tag

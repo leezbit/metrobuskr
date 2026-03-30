@@ -1,4 +1,4 @@
-"""Data coordinator for Gyeonggi Bus."""
+"""Data coordinator for regional bus arrivals."""
 
 from __future__ import annotations
 
@@ -9,31 +9,36 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
 from .api import (
     Arrival,
-    GGBusApi,
-    GGBusApiError,
-    GGBusAuthError,
-    GGBusQuotaError,
+    BusApi,
+    BusApiError,
+    BusAuthError,
+    BusQuotaError,
 )
 from .const import (
     CONF_API_KEY,
+    CONF_REGION,
     CONF_SCAN_INTERVAL_SECONDS,
     CONF_STATION_ID,
+    DEFAULT_REGION,
     DEFAULT_SCAN_INTERVAL_SECONDS,
     DOMAIN,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
+
 class GGBusCoordinator(DataUpdateCoordinator[dict[str, Arrival]]):
     """Coordinate station arrivals for all selected buses."""
 
     def __init__(self, hass: HomeAssistant, entry) -> None:
         self.entry = entry
+        self.region = entry.data.get(CONF_REGION, DEFAULT_REGION)
         api_key = entry.data[CONF_API_KEY]
         self.station_id = entry.data[CONF_STATION_ID]
-        self.api = GGBusApi(async_get_clientsession(hass), api_key)
+        self.api = BusApi(async_get_clientsession(hass), api_key, region=self.region)
         scan_seconds = int(entry.options.get(CONF_SCAN_INTERVAL_SECONDS, DEFAULT_SCAN_INTERVAL_SECONDS))
         self._default_interval = timedelta(seconds=max(30, scan_seconds))
 
@@ -67,18 +72,18 @@ class GGBusCoordinator(DataUpdateCoordinator[dict[str, Arrival]]):
             self.total_success_count += 1
             self.update_interval = self._default_interval
             return arrivals
-        except GGBusAuthError as err:
+        except BusAuthError as err:
             self.last_api_status = "auth_error"
             self.last_api_error = str(err)
             self._track_error("auth_error")
             raise ConfigEntryAuthFailed from err
-        except GGBusQuotaError as err:
+        except BusQuotaError as err:
             self.last_api_status = "quota_exceeded"
             self.last_api_error = str(err)
             self._track_error("quota_exceeded")
             self.update_interval = self._default_interval
             raise UpdateFailed(str(err)) from err
-        except GGBusApiError as err:
+        except BusApiError as err:
             self.last_api_error = str(err)
             if _is_quota_error(str(err)):
                 self.last_api_status = "quota_exceeded"
@@ -100,6 +105,7 @@ class GGBusCoordinator(DataUpdateCoordinator[dict[str, Arrival]]):
         self.last_error_type = error_type
         self.consecutive_error_count += 1
         self.total_error_count += 1
+
 
 def _is_quota_error(message: str) -> bool:
     normalized = message.upper()

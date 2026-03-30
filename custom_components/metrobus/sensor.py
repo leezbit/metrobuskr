@@ -1,4 +1,4 @@
-"""Sensor platform for Gyeonggi Bus arrivals."""
+"""Sensor platform for regional bus arrivals."""
 
 from __future__ import annotations
 
@@ -18,10 +18,13 @@ from homeassistant.util import dt as dt_util
 
 from .api import Arrival
 from .const import (
+    CONF_REGION,
     CONF_SELECTED_ROUTES,
     CONF_STATION_ID,
     CONF_STATION_NAME,
+    DEFAULT_REGION,
     DOMAIN,
+    REGION_MANUFACTURERS,
 )
 from .coordinator import GGBusCoordinator
 
@@ -84,6 +87,16 @@ METRICS: tuple[GGBusMetricDescription, ...] = (
 )
 
 
+def _station_identifier(entry: ConfigEntry) -> str:
+    region = entry.data.get(CONF_REGION, DEFAULT_REGION)
+    return f"{region}:{entry.data[CONF_STATION_ID]}"
+
+
+def _manufacturer(entry: ConfigEntry) -> str:
+    region = entry.data.get(CONF_REGION, DEFAULT_REGION)
+    return REGION_MANUFACTURERS.get(region, "Public Transit")
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -105,13 +118,13 @@ async def async_setup_entry(
                 registry.async_remove(reg_entry.entity_id)
 
     device_registry = dr.async_get(hass)
-    station_id = entry.data[CONF_STATION_ID]
+    station_identifier = _station_identifier(entry)
     selected_set = set(selected_route_ids)
     for device in dr.async_entries_for_config_entry(device_registry, entry.entry_id):
         for domain, identifier in device.identifiers:
             if domain != DOMAIN:
                 continue
-            prefix = f"{station_id}_"
+            prefix = f"{station_identifier}_"
             if identifier.startswith(prefix):
                 route_id = identifier[len(prefix) :]
                 if route_id not in selected_set:
@@ -141,12 +154,12 @@ class GGBusApiStatusSensor(CoordinatorEntity[GGBusCoordinator], SensorEntity):
     @property
     def device_info(self) -> DeviceInfo:
         """Attach to parent station device."""
-        station_id = self._entry.data[CONF_STATION_ID]
+        station_id = _station_identifier(self._entry)
         station_name = self._entry.data[CONF_STATION_NAME]
         return DeviceInfo(
             identifiers={(DOMAIN, station_id)},
             name=station_name,
-            manufacturer="Gyeonggi-do",
+            manufacturer=_manufacturer(self._entry),
             model="Bus Stop",
         )
 
@@ -187,7 +200,6 @@ class GGBusApiStatusSensor(CoordinatorEntity[GGBusCoordinator], SensorEntity):
 
     @property
     def available(self) -> bool:
-        """Always show status sensor even during API errors."""
         return True
 
 
@@ -212,16 +224,15 @@ class GGBusRouteMetricSensor(CoordinatorEntity[GGBusCoordinator], SensorEntity):
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return bus device metadata (child of station device)."""
         arrival = self._arrival
         route_name = _route_label(arrival.route_name if arrival else self._route_id)
-        station_id = self._entry.data[CONF_STATION_ID]
+        station_id = _station_identifier(self._entry)
         station_name = self._entry.data[CONF_STATION_NAME]
 
         return DeviceInfo(
             identifiers={(DOMAIN, f"{station_id}_{self._route_id}")},
             name=route_name,
-            manufacturer="Gyeonggi-do",
+            manufacturer=_manufacturer(self._entry),
             model="Bus Route",
             via_device=(DOMAIN, station_id),
             suggested_area=station_name,
@@ -229,7 +240,6 @@ class GGBusRouteMetricSensor(CoordinatorEntity[GGBusCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> Any:
-        """Return metric value for the route."""
         arrival = self._arrival
         if arrival is None:
             return None
@@ -252,7 +262,6 @@ class GGBusRouteMetricSensor(CoordinatorEntity[GGBusCoordinator], SensorEntity):
 
     @property
     def native_unit_of_measurement(self) -> str | None:
-        """Return unit only when state is numeric."""
         if self._metric.unit is None:
             return None
         value = self.native_value
@@ -260,7 +269,6 @@ class GGBusRouteMetricSensor(CoordinatorEntity[GGBusCoordinator], SensorEntity):
 
     @property
     def available(self) -> bool:
-        """Entity availability follows route presence in station payload."""
         return super().available and self._arrival is not None
 
     @property
@@ -318,17 +326,18 @@ def _effective_api_status(coordinator: GGBusCoordinator) -> str:
     age_seconds = (dt_util.utcnow() - success_at).total_seconds()
     if age_seconds >= stale_after_seconds:
         return "stale"
+
     return "ok"
 
 
-def _recommended_action(status_code: str) -> str:
-    recommendations = {
-        "ok": "정상 수집 중입니다.",
-        "stale": "최근 데이터가 지연되었습니다. 잠시 후 다시 확인하세요.",
-        "auth_error": "API 서비스키 유효기간/권한을 확인하세요.",
-        "quota_exceeded": "일일 호출량 초과 상태입니다. 익일에 재시도하세요.",
-        "api_error": "공공 API 응답 상태를 확인하고 잠시 후 재시도하세요.",
-        "unknown_error": "통합을 재시작하고 로그를 확인하세요.",
-        "unknown": "첫 수집 대기 중입니다.",
+def _recommended_action(status: str) -> str:
+    mapping = {
+        "ok": "정상 동작 중입니다.",
+        "unknown": "잠시 후 상태를 다시 확인하세요.",
+        "stale": "API 응답 지연 여부를 점검하세요.",
+        "auth_error": "API 키를 확인한 뒤 통합을 재설정하세요.",
+        "quota_exceeded": "일일 호출량 초과입니다. 익일 다시 시도하세요.",
+        "api_error": "공공 API 상태를 확인하고 잠시 후 재시도하세요.",
+        "unknown_error": "Home Assistant 로그를 확인하세요.",
     }
-    return recommendations.get(status_code, "로그를 확인하세요.")
+    return mapping.get(status, "상태를 확인하세요.")

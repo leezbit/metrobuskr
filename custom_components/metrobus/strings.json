@@ -2,11 +2,18 @@
   "config": {
     "step": {
       "user": {
-        "title": "경기도 버스 정류장 추가",
-        "description": "API 키와 5자리 정류장 번호를 입력하세요.",
+        "title": "지역 선택",
+        "description": "추가할 버스 도착정보 지역을 선택하세요.",
+        "data": {
+          "region": "지역"
+        }
+      },
+      "station": {
+        "title": "버스 정류장 추가",
+        "description": "선택한 지역의 API 키와 정류장 번호를 입력하세요.",
         "data": {
           "api_key": "공공데이터 API 서비스키",
-          "station_code": "정류장 번호(5자리)"
+          "station_code": "정류장 번호(고유번호)"
         }
       },
       "routes": {
@@ -47,6 +54,14 @@
       "no_route_selected": "최소 1개 버스를 선택해야 합니다.",
       "no_routes_found": "해당 정류장의 노선 정보를 찾을 수 없습니다.",
       "quota_exceeded": "API 일일 호출량을 초과했습니다. 익일 다시 시도하세요."
+    }
+  },
+  "selector": {
+    "region": {
+      "options": {
+        "gyeonggi": "경기도",
+        "seoul": "서울특별시"
+      }
     }
   }
 }

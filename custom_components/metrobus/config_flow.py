@@ -1,4 +1,4 @@
-"""Config flow for Gyeonggi Bus integration."""
+"""Config flow for regional bus integration."""
 
 from __future__ import annotations
 
@@ -22,16 +22,20 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from .api import GGBusApi, GGBusApiError, GGBusAuthError, GGBusQuotaError, GGBusStationNotFoundError
+from .api import BusApi, BusApiError, BusAuthError, BusQuotaError, BusStationNotFoundError
 from .const import (
     CONF_API_KEY,
+    CONF_REGION,
     CONF_SCAN_INTERVAL_SECONDS,
     CONF_SELECTED_ROUTES,
     CONF_STATION_CODE,
     CONF_STATION_ID,
     CONF_STATION_NAME,
+    DEFAULT_REGION,
     DEFAULT_SCAN_INTERVAL_SECONDS,
     DOMAIN,
+    REGION_LABELS,
+    REGION_OPTIONS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -45,11 +49,13 @@ SCAN_INTERVAL_SELECTOR = NumberSelector(
     )
 )
 
+
 class GGBusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for GGBus."""
+    """Handle a config flow for regional bus arrivals."""
 
     VERSION = 1
 
+    _region: str
     _api_key: str
     _station_code: str
     _station_id: str
@@ -65,31 +71,54 @@ class GGBusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        if user_input is not None:
+            self._region = user_input[CONF_REGION]
+            return await self.async_step_station()
+
+        region_selector = SelectSelector(
+            SelectSelectorConfig(
+                options=[
+                    {"label": REGION_LABELS[region], "value": region}
+                    for region in REGION_OPTIONS
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        )
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_REGION, default=DEFAULT_REGION): region_selector,
+            }
+        )
+        return self.async_show_form(step_id="user", data_schema=schema)
+
+    async def async_step_station(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         errors: dict[str, str] = {}
 
         if user_input is not None:
             input_key = user_input[CONF_API_KEY].strip()
-            self._api_key = input_key or self._default_api_key()
+            self._api_key = input_key or self._default_api_key(self._region)
             self._station_code = user_input[CONF_STATION_CODE].strip()
             if not self._api_key:
                 errors["base"] = "invalid_auth"
                 api = None
             else:
-                api = GGBusApi(async_get_clientsession(self.hass), self._api_key)
+                api = BusApi(async_get_clientsession(self.hass), self._api_key, region=self._region)
 
             try:
                 if api is None:
-                    raise GGBusAuthError
+                    raise BusAuthError
                 station = await api.resolve_station_by_code(self._station_code)
                 arrivals = await api.get_station_arrivals(station.station_id)
-            except GGBusAuthError:
+            except BusAuthError:
                 errors["base"] = "invalid_auth"
-            except GGBusStationNotFoundError:
+            except BusStationNotFoundError:
                 errors["base"] = "station_not_found"
-            except GGBusQuotaError:
+            except BusQuotaError:
                 errors["base"] = "quota_exceeded"
-            except GGBusApiError as err:
-                _LOGGER.warning("GGBus setup failed for station_code=%s: %s", self._station_code, err)
+            except BusApiError as err:
+                _LOGGER.warning("Bus setup failed region=%s station_code=%s: %s", self._region, self._station_code, err)
                 errors["base"] = "cannot_connect"
             else:
                 self._station_id = station.station_id
@@ -103,20 +132,21 @@ class GGBusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if not self._route_options:
                     errors["base"] = "no_routes_found"
                 else:
-                    await self.async_set_unique_id(self._station_id)
+                    unique_id = f"{self._region}:{self._station_id}"
+                    await self.async_set_unique_id(unique_id)
                     self._abort_if_unique_id_configured()
                     return await self.async_step_routes()
 
-        default_api = self._default_api_key()
+        default_api = self._default_api_key(self._region)
         schema = vol.Schema(
             {
                 vol.Required(CONF_API_KEY, default=default_api): TextSelector(
                     TextSelectorConfig(type=TextSelectorType.PASSWORD)
                 ),
-                vol.Required(CONF_STATION_CODE): vol.All(str, vol.Length(min=5, max=5)),
+                vol.Required(CONF_STATION_CODE): vol.All(str, vol.Length(min=4, max=6)),
             }
         )
-        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+        return self.async_show_form(step_id="station", data_schema=schema, errors=errors)
 
     async def async_step_routes(
         self, user_input: dict[str, Any] | None = None
@@ -132,6 +162,7 @@ class GGBusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(
                     title=f"{self._station_name} ({self._station_code})",
                     data={
+                        CONF_REGION: self._region,
                         CONF_API_KEY: self._api_key,
                         CONF_STATION_CODE: self._station_code,
                         CONF_STATION_ID: self._station_id,
@@ -170,10 +201,15 @@ class GGBusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"station_name": self._station_name},
         )
 
-    def _default_api_key(self) -> str:
+    def _default_api_key(self, region: str) -> str:
         entries = self._async_current_entries()
         if not entries:
             return ""
+
+        for entry in entries:
+            if entry.data.get(CONF_REGION, DEFAULT_REGION) == region and entry.data.get(CONF_API_KEY):
+                return str(entry.data[CONF_API_KEY])
+
         return entries[0].data.get(CONF_API_KEY, "")
 
 
@@ -187,7 +223,7 @@ def _route_label(route_name: str) -> str:
 
 
 class GGBusOptionsFlow(config_entries.OptionsFlow):
-    """Handle options for an existing GGBus entry."""
+    """Handle options for an existing config entry."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self._entry = config_entry
@@ -198,17 +234,18 @@ class GGBusOptionsFlow(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
         api_key = self._entry.data[CONF_API_KEY]
         station_id = self._entry.data[CONF_STATION_ID]
+        region = self._entry.data.get(CONF_REGION, DEFAULT_REGION)
 
-        api = GGBusApi(async_get_clientsession(self.hass), api_key)
+        api = BusApi(async_get_clientsession(self.hass), api_key, region=region)
         try:
             arrivals = await api.get_station_arrivals(station_id)
-        except GGBusAuthError:
+        except BusAuthError:
             errors["base"] = "invalid_auth"
             arrivals = {}
-        except GGBusQuotaError:
+        except BusQuotaError:
             errors["base"] = "quota_exceeded"
             arrivals = {}
-        except GGBusApiError:
+        except BusApiError:
             errors["base"] = "cannot_connect"
             arrivals = {}
 
@@ -220,7 +257,6 @@ class GGBusOptionsFlow(config_entries.OptionsFlow):
         current_selected = current_selected_raw if isinstance(current_selected_raw, list) else []
 
         if not route_options:
-            # API 일시 장애 시에도 현재 선택값 기반으로 옵션 저장(주기 변경 등)은 가능하게 유지.
             route_options = {route_id: route_id for route_id in current_selected}
 
         if user_input is not None:
@@ -258,9 +294,7 @@ class GGBusOptionsFlow(config_entries.OptionsFlow):
                 ): selector,
                 vol.Required(
                     CONF_SCAN_INTERVAL_SECONDS,
-                    default=int(
-                        self._entry.options.get(CONF_SCAN_INTERVAL_SECONDS, DEFAULT_SCAN_INTERVAL_SECONDS)
-                    ),
+                    default=int(self._entry.options.get(CONF_SCAN_INTERVAL_SECONDS, DEFAULT_SCAN_INTERVAL_SECONDS)),
                 ): SCAN_INTERVAL_SELECTOR,
             }
         )

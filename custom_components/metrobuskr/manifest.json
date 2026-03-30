@@ -1,13 +1,13 @@
 {
   "domain": "ggbus",
-  "name": "Gyeonggi Bus Stop Arrivals",
+  "name": "Korea Bus Stop Arrivals (Gyeonggi/Seoul)",
   "codeowners": [
     "@leezbit"
   ],
   "config_flow": true,
-  "documentation": "https://www.data.go.kr/data/15080346/openapi.do",
+  "documentation": "https://www.data.go.kr/data/15000314/openapi.do",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "requirements": [],
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

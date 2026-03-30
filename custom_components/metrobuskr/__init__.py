@@ -1,4 +1,4 @@
-"""The Gyeonggi Bus integration."""
+"""The regional bus integration."""
 
 from __future__ import annotations
 
@@ -7,34 +7,43 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 
 from .const import (
+    CONF_REGION,
     CONF_SELECTED_ROUTES,
     CONF_STATION_CODE,
     CONF_STATION_ID,
     CONF_STATION_NAME,
+    DEFAULT_REGION,
     DOMAIN,
     PLATFORMS,
+    REGION_MANUFACTURERS,
 )
 from .coordinator import GGBusCoordinator
 
 GGBusConfigEntry = ConfigEntry[GGBusCoordinator]
 
 
+def _station_identifier(region: str, station_id: str) -> str:
+    return f"{region}:{station_id}"
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: GGBusConfigEntry) -> bool:
-    """Set up Gyeonggi Bus from a config entry."""
+    """Set up bus arrivals from a config entry."""
     coordinator = GGBusCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
 
+    region = entry.data.get(CONF_REGION, DEFAULT_REGION)
     station_id = entry.data[CONF_STATION_ID]
     station_name = entry.data[CONF_STATION_NAME]
     station_code = entry.data[CONF_STATION_CODE]
+    station_identifier = _station_identifier(region, station_id)
 
     device_registry = dr.async_get(hass)
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, station_id)},
-        manufacturer="Gyeonggi-do",
+        identifiers={(DOMAIN, station_identifier)},
+        manufacturer=REGION_MANUFACTURERS.get(region, "Public Transit"),
         model="Bus Stop",
-        name=f"{station_name} ({station_code})"
+        name=f"{station_name} ({station_code})",
     )
 
     entry.runtime_data = coordinator
@@ -59,18 +68,20 @@ async def async_remove_config_entry_device(
     device_entry: dr.DeviceEntry,
 ) -> bool:
     """Allow removing child bus devices by updating selected routes."""
+    region = entry.data.get(CONF_REGION, DEFAULT_REGION)
     station_id = entry.data[CONF_STATION_ID]
+    station_identifier = _station_identifier(region, station_id)
     target_route_id: str | None = None
 
     for domain, identifier in device_entry.identifiers:
         if domain != DOMAIN:
             continue
 
-        if identifier == station_id:
+        if identifier == station_identifier:
             await hass.config_entries.async_remove(entry.entry_id)
             return True
 
-        prefix = f"{station_id}_"
+        prefix = f"{station_identifier}_"
         if identifier.startswith(prefix):
             target_route_id = identifier[len(prefix) :]
             break
@@ -80,7 +91,6 @@ async def async_remove_config_entry_device(
 
     current_selected = entry.options.get(CONF_SELECTED_ROUTES, [])
     if target_route_id not in current_selected:
-        # Stale shell device with no linked selected route: allow HA to remove it.
         return True
 
     updated = [rid for rid in current_selected if rid != target_route_id]

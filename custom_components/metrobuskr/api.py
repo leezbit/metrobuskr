@@ -1,4 +1,4 @@
-"""API client for Gyeonggi bus data.go.kr endpoints."""
+"""API clients for Gyeonggi/Seoul bus endpoints."""
 
 from __future__ import annotations
 
@@ -11,33 +11,52 @@ import xml.etree.ElementTree as ET
 
 from aiohttp import ClientError, ClientSession
 
+from .const import REGION_GYEONGGI, REGION_SEOUL
+
 _LOGGER = logging.getLogger(__name__)
 
-STATION_ENDPOINTS = (
+GYEONGGI_STATION_ENDPOINTS = (
     "http://apis.data.go.kr/6410000/busstationservice/v2/getBusStationListv2",
     "https://apis.data.go.kr/6410000/busstationservice/v2/getBusStationListv2",
 )
 
-ARRIVAL_ENDPOINTS = (
+GYEONGGI_ARRIVAL_ENDPOINTS = (
     "http://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2",
     "https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2",
 )
 
+SEOUL_STATION_ENDPOINTS = (
+    "http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid",
+    "https://ws.bus.go.kr/api/rest/stationinfo/getStationByUid",
+)
 
-class GGBusApiError(Exception):
+SEOUL_ARRIVAL_ENDPOINTS = (
+    "http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId",
+    "https://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId",
+)
+
+
+class BusApiError(Exception):
     """Base API error."""
 
 
-class GGBusAuthError(GGBusApiError):
+class BusAuthError(BusApiError):
     """Authentication/authorization error."""
 
 
-class GGBusStationNotFoundError(GGBusApiError):
+class BusStationNotFoundError(BusApiError):
     """Raised when a station code cannot be resolved."""
 
 
-class GGBusQuotaError(GGBusApiError):
+class BusQuotaError(BusApiError):
     """Raised when API daily quota is exceeded."""
+
+
+# Backward-compatible aliases for existing imports.
+GGBusApiError = BusApiError
+GGBusAuthError = BusAuthError
+GGBusStationNotFoundError = BusStationNotFoundError
+GGBusQuotaError = BusQuotaError
 
 
 @dataclass(slots=True)
@@ -66,29 +85,35 @@ class Arrival:
     plate_no_2: str | None
 
 
-class GGBusApi:
-    """Thin async API wrapper."""
+class BusApi:
+    """Thin async API wrapper with region-aware endpoint mapping."""
 
-    def __init__(self, session: ClientSession, api_key: str) -> None:
+    def __init__(self, session: ClientSession, api_key: str, region: str = REGION_GYEONGGI) -> None:
         self._session = session
         self._api_key = api_key.strip()
+        self._region = region
 
     async def resolve_station_by_code(self, station_code: str) -> Station:
-        """Resolve stop 5-digit code to stationId and name."""
+        if self._region == REGION_SEOUL:
+            return await self._resolve_station_by_code_seoul(station_code)
+        return await self._resolve_station_by_code_gyeonggi(station_code)
+
+    async def get_station_arrivals(self, station_id: str) -> dict[str, Arrival]:
+        if self._region == REGION_SEOUL:
+            return await self._get_station_arrivals_seoul(station_id)
+        return await self._get_station_arrivals_gyeonggi(station_id)
+
+    async def _resolve_station_by_code_gyeonggi(self, station_code: str) -> Station:
         query = station_code.strip()
         if not query:
-            raise GGBusApiError("Station code is empty")
+            raise BusApiError("Station code is empty")
 
         params_candidates = [
             {"serviceKey": key, "keyword": query, "format": "json"}
             for key in self._service_key_candidates()
         ]
 
-        payload = await self._request_with_fallback(
-            list(STATION_ENDPOINTS),
-            params_candidates,
-        )
-
+        payload = await self._request_with_fallback(list(GYEONGGI_STATION_ENDPOINTS), params_candidates)
         items = _extract_items(payload)
         query_digits = _digits_only(query)
         best_match: Station | None = None
@@ -105,14 +130,11 @@ class GGBusApi:
             mobile_no_digits = _digits_only(mobile_no_raw)
 
             matches_exact = query_digits in {station_no_digits, mobile_no_digits}
-            matches_suffix = (
-                bool(query_digits)
-                and (
-                    station_no_digits.endswith(query_digits)
-                    or mobile_no_digits.endswith(query_digits)
-                    or query_digits.endswith(station_no_digits)
-                    or query_digits.endswith(mobile_no_digits)
-                )
+            matches_suffix = bool(query_digits) and (
+                station_no_digits.endswith(query_digits)
+                or mobile_no_digits.endswith(query_digits)
+                or query_digits.endswith(station_no_digits)
+                or query_digits.endswith(mobile_no_digits)
             )
 
             if matches_exact:
@@ -123,47 +145,57 @@ class GGBusApi:
 
         if best_match is not None:
             return best_match
+        raise BusStationNotFoundError(f"Station code {station_code} was not found")
 
-        raise GGBusStationNotFoundError(f"Station code {station_code} was not found")
+    async def _resolve_station_by_code_seoul(self, station_code: str) -> Station:
+        query_digits = _digits_only(station_code)
+        if not query_digits:
+            raise BusApiError("Station code is empty")
 
-    async def get_station_arrivals(self, station_id: str) -> dict[str, Arrival]:
-        """Fetch all arrivals for a station in a single API call."""
+        params_candidates = []
+        for key in self._service_key_candidates():
+            params_candidates.append({"ServiceKey": key, "arsId": query_digits})
+            params_candidates.append({"serviceKey": key, "arsId": query_digits})
+
+        payload = await self._request_with_fallback(list(SEOUL_STATION_ENDPOINTS), params_candidates)
+        items = _extract_items(payload)
+
+        for item in items:
+            ars_id = str(item.get("arsId") or item.get("arsid") or "").strip()
+            station_id = str(item.get("stId") or item.get("stationId") or item.get("stationid") or "").strip()
+            station_name = str(item.get("stNm") or item.get("stationNm") or item.get("stationName") or "").strip()
+            if not station_id:
+                continue
+
+            if _digits_only(ars_id) == query_digits or not ars_id:
+                return Station(
+                    station_id=station_id,
+                    station_name=station_name or station_code,
+                    station_no=ars_id or station_code,
+                )
+
+        raise BusStationNotFoundError(f"Station code {station_code} was not found")
+
+    async def _get_station_arrivals_gyeonggi(self, station_id: str) -> dict[str, Arrival]:
         params_candidates = [
             {"serviceKey": key, "stationId": station_id, "format": "json"}
             for key in self._service_key_candidates()
         ]
-
-        payload = await self._request_with_fallback(
-            list(ARRIVAL_ENDPOINTS),
-            params_candidates,
-        )
-
+        payload = await self._request_with_fallback(list(GYEONGGI_ARRIVAL_ENDPOINTS), params_candidates)
         items = _extract_items(payload)
-        arrivals: dict[str, Arrival] = {}
-        for item in items:
-            route_id = str(item.get("routeId") or item.get("routeid") or "").strip()
-            route_name = str(item.get("routeName") or item.get("routename") or "").strip()
-            if not route_id or not route_name:
-                continue
+        return _arrivals_from_gyeonggi_items(items)
 
-            arrivals[route_id] = Arrival(
-                route_id=route_id,
-                route_name=route_name,
-                location_no_1=_to_int(item.get("locationNo1")),
-                predict_time_1=_to_int(item.get("predictTime1")),
-                location_no_2=_to_int(item.get("locationNo2")),
-                predict_time_2=_to_int(item.get("predictTime2")),
-                flag=_to_optional_str(item.get("flag")),
-                low_plate_1=_to_low_plate_code(_first_present(item, "lowPlate1", "lowplate1", "low_plate_1")),
-                low_plate_2=_to_low_plate_code(_first_present(item, "lowPlate2", "lowplate2", "low_plate_2")),
-                plate_no_1=_to_optional_str(item.get("plateNo1")),
-                plate_no_2=_to_optional_str(item.get("plateNo2")),
-            )
+    async def _get_station_arrivals_seoul(self, station_id: str) -> dict[str, Arrival]:
+        params_candidates = []
+        for key in self._service_key_candidates():
+            params_candidates.append({"ServiceKey": key, "stId": station_id})
+            params_candidates.append({"serviceKey": key, "stId": station_id})
 
-        return arrivals
+        payload = await self._request_with_fallback(list(SEOUL_ARRIVAL_ENDPOINTS), params_candidates)
+        items = _extract_items(payload)
+        return _arrivals_from_seoul_items(items)
 
     def _service_key_candidates(self) -> list[str]:
-        """Try raw and decoded values to avoid key-format mismatch."""
         candidates = [self._api_key]
         if "%" in self._api_key:
             decoded = unquote(self._api_key)
@@ -181,45 +213,139 @@ class GGBusApi:
             for params in params_candidates:
                 try:
                     return await self._request(endpoint, params)
-                except GGBusAuthError:
+                except BusAuthError:
                     raise
-                except GGBusApiError as err:
+                except BusApiError as err:
                     last_error = err
-                    _LOGGER.debug("GGBus endpoint failed %s params=%s err=%s", endpoint, params, err)
+                    _LOGGER.debug("Bus endpoint failed %s params=%s err=%s", endpoint, params, err)
 
-        raise GGBusApiError(str(last_error) if last_error else "Unknown API failure")
+        raise BusApiError(str(last_error) if last_error else "Unknown API failure")
 
     async def _request(self, endpoint: str, params: dict[str, str]) -> dict[str, Any]:
         try:
             response = await self._session.get(endpoint, params=params, timeout=15)
             text = await response.text()
         except ClientError as err:
-            raise GGBusApiError(f"Connection error: {err}") from err
+            raise BusApiError(f"Connection error: {err}") from err
 
         if response.status in (401, 403):
-            raise GGBusAuthError("API key is not authorized")
+            raise BusAuthError("API key is not authorized")
         if response.status == 429:
-            raise GGBusQuotaError("API quota exceeded (HTTP 429)")
+            raise BusQuotaError("API quota exceeded (HTTP 429)")
         if response.status >= 400:
-            raise GGBusApiError(f"API HTTP error {response.status}")
+            raise BusApiError(f"API HTTP error {response.status}")
 
         payload = _parse_payload(text)
         result_code = _extract_result_code(payload)
         if result_code and result_code not in {"0", "00", "INFO-000", "SUCCESS"}:
             normalized = result_code.upper()
             if "SERVICE_KEY" in normalized or "AUTH" in normalized:
-                raise GGBusAuthError(result_code)
+                raise BusAuthError(result_code)
             if "LIMIT" in normalized or "EXCEED" in normalized or "QUOTA" in normalized:
-                raise GGBusQuotaError(result_code)
-            raise GGBusApiError(result_code)
+                raise BusQuotaError(result_code)
+            raise BusApiError(result_code)
 
         return payload
+
+
+# Backward-compatible alias
+GGBusApi = BusApi
+
+
+def _arrivals_from_gyeonggi_items(items: list[dict[str, Any]]) -> dict[str, Arrival]:
+    arrivals: dict[str, Arrival] = {}
+    for item in items:
+        route_id = str(item.get("routeId") or item.get("routeid") or "").strip()
+        route_name = str(item.get("routeName") or item.get("routename") or "").strip()
+        if not route_id or not route_name:
+            continue
+
+        arrivals[route_id] = Arrival(
+            route_id=route_id,
+            route_name=route_name,
+            location_no_1=_to_int(item.get("locationNo1")),
+            predict_time_1=_to_int(item.get("predictTime1")),
+            location_no_2=_to_int(item.get("locationNo2")),
+            predict_time_2=_to_int(item.get("predictTime2")),
+            flag=_to_optional_str(item.get("flag")),
+            low_plate_1=_to_low_plate_code(_first_present(item, "lowPlate1", "lowplate1", "low_plate_1")),
+            low_plate_2=_to_low_plate_code(_first_present(item, "lowPlate2", "lowplate2", "low_plate_2")),
+            plate_no_1=_to_optional_str(item.get("plateNo1")),
+            plate_no_2=_to_optional_str(item.get("plateNo2")),
+        )
+
+    return arrivals
+
+
+def _arrivals_from_seoul_items(items: list[dict[str, Any]]) -> dict[str, Arrival]:
+    arrivals: dict[str, Arrival] = {}
+    for item in items:
+        route_id = str(item.get("busRouteId") or item.get("busrouteid") or "").strip()
+        route_name = str(item.get("rtNm") or item.get("rtnm") or "").strip()
+        if not route_id or not route_name:
+            continue
+
+        arrivals[route_id] = Arrival(
+            route_id=route_id,
+            route_name=route_name,
+            location_no_1=_to_int(_extract_station_distance(item.get("arrmsg1") or item.get("arrMsg1"))),
+            predict_time_1=_to_int(_first_present(item, "traTime1") or _extract_minutes(item.get("arrmsg1") or item.get("arrMsg1"))),
+            location_no_2=_to_int(_extract_station_distance(item.get("arrmsg2") or item.get("arrMsg2"))),
+            predict_time_2=_to_int(_first_present(item, "traTime2") or _extract_minutes(item.get("arrmsg2") or item.get("arrMsg2"))),
+            flag=_to_optional_str(item.get("arrmsgSec1") or item.get("arrmsg1") or item.get("arrMsg1")),
+            low_plate_1=_to_low_plate_code_from_bus_type(_first_present(item, "busType1", "busTypeNm1")),
+            low_plate_2=_to_low_plate_code_from_bus_type(_first_present(item, "busType2", "busTypeNm2")),
+            plate_no_1=_to_optional_str(item.get("plainNo1")),
+            plate_no_2=_to_optional_str(item.get("plainNo2")),
+        )
+
+    return arrivals
+
+
+def _extract_minutes(value: Any) -> int | None:
+    text = _to_optional_str(value)
+    if text is None:
+        return None
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
+def _extract_station_distance(value: Any) -> int | None:
+    text = _to_optional_str(value)
+    if text is None:
+        return None
+    markers = ("전", "번째", "정류장")
+    if not any(marker in text for marker in markers):
+        return None
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
+def _to_low_plate_code_from_bus_type(value: Any) -> str | None:
+    text = _to_optional_str(value)
+    if text is None:
+        return None
+    if "저상" in text:
+        return "1"
+    if text in {"0", "1", "2", "5", "6", "7"}:
+        return text
+    return None
 
 
 def _parse_payload(text: str) -> dict[str, Any]:
     body = text.strip()
     if not body:
-        raise GGBusApiError("Empty response")
+        raise BusApiError("Empty response")
 
     if body.startswith("{"):
         return json.loads(body)
@@ -227,11 +353,11 @@ def _parse_payload(text: str) -> dict[str, Any]:
     try:
         root = ET.fromstring(body)
     except ET.ParseError as err:
-        raise GGBusApiError("Unsupported payload") from err
+        raise BusApiError("Unsupported payload") from err
 
     parsed = _xml_to_dict(root)
     if isinstance(parsed, str):
-        raise GGBusApiError("Unexpected scalar payload")
+        raise BusApiError("Unexpected scalar payload")
     return parsed
 
 
@@ -260,7 +386,7 @@ def _extract_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(msg_body, dict):
         return []
 
-    for key in ("busArrivalList", "busStationList", "itemList", "item"):
+    for key in ("busArrivalList", "busStationList", "itemList", "item", "ServiceResult"):
         value = msg_body.get(key)
         if value is None:
             continue
@@ -302,7 +428,6 @@ def _to_low_plate_code(value: Any) -> str | None:
     if normalized in {"0", "1", "2", "5", "6", "7"}:
         return normalized
 
-    # 일부 환경에서 bool 계열 문자열이 섞여 들어오는 경우 보정
     if normalized in {"TRUE", "Y", "YES", "ON"}:
         return "1"
     if normalized in {"FALSE", "N", "NO", "OFF"}:
@@ -326,4 +451,3 @@ def _first_present(payload: dict[str, Any], *keys: str) -> Any:
         if key in payload and payload[key] is not None:
             return payload[key]
     return None
-
